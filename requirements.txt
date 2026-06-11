@@ -1,0 +1,5 @@
+whisperx
+rapidfuzz
+unidecode
+pyyaml
+PySide6

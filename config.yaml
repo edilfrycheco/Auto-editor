@@ -1,0 +1,37 @@
+paths:
+  cache_dir: ~/.f24_cache/transcripts
+  muletillas_file: muletillas.txt
+  contracciones_file: contracciones.txt
+  frases_correccion_file: frases_correccion.txt
+  nombres_file: nombres.txt
+  ffmpeg_path: ''
+semantic_matching:
+  enabled: false
+  gemini_api_key: ''
+auto_similarity:
+  enabled: false
+whisper:
+  model_size: medium
+  language: es
+  compute_type: int8
+  device: cpu
+alignment:
+  tolerance_threshold: 65
+  retake_window_seconds: 120
+  match_complete: 75
+  match_partial: 55
+  partial_min_coverage: 0.4
+llm:
+  provider: ollama
+  model: qwen3:32b
+padding:
+  pre_head_ms: 120
+  post_tail_ms: 180
+  max_silence_ms: 1000
+  remaining_silence_ms: 300
+zooms:
+  levels:
+  - 1.0
+  - 1.08
+  - 1.15
+  smart_toggle: true

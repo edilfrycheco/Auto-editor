@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.zip
+debug_preview.json
+debug_apply.json
+reporte_cortes.html
