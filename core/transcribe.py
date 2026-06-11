@@ -40,6 +40,10 @@ class Transcriber:
         self.compute_type = whisper_conf.get("compute_type", "int8")
         self.device = whisper_conf.get("device", "cpu")
         self.ffmpeg_path = self._find_ffmpeg()
+        if self.ffmpeg_path:
+            ffmpeg_dir = os.path.dirname(self.ffmpeg_path)
+            if ffmpeg_dir not in os.environ.get("PATH", "").split(os.pathsep):
+                os.environ["PATH"] = f"{ffmpeg_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
     def _find_ffmpeg(self) -> str:
         # 1. Check config file
