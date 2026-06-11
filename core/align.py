@@ -13,6 +13,10 @@ class AlignmentEngine:
         self.match_complete = align_conf.get("match_complete", 75)
         self.match_partial = align_conf.get("match_partial", 55)
         self.partial_min_coverage = align_conf.get("partial_min_coverage", 0.4)
+        
+        from core.llm_judge import LLMJudge
+        self.llm_judge = LLMJudge(self.config)
+        self.max_silence_s = self.config.get("llm_judge", {}).get("max_internal_silence_ms", 1200) / 1000.0
 
     def _ask_ollama(self, text, script_sentences, model_name):
         import requests
@@ -65,7 +69,7 @@ class AlignmentEngine:
         sentences = re.split(r'(?<=[.!?])\s+', text)
         return [s.strip() for s in sentences if s.strip()]
 
-    def align(self, script: str, transcript_words: list):
+    def align(self, script: str, transcript_words: list, progress_callback=None):
         script_sentences = self.split_sentences(script)
         norm_words = [self.normalize(w["word"]) for w in transcript_words]
         
@@ -312,7 +316,8 @@ class AlignmentEngine:
                 final_groups.append(g)
                 
         # Re-evaluate best_take after deduplication
-        for fg in final_groups:
+        total_groups = len(final_groups)
+        for i, fg in enumerate(final_groups):
             unique_takes = []
             seen = set()
             for t in fg["takes"]:
@@ -320,8 +325,58 @@ class AlignmentEngine:
                 if bounds not in seen:
                     seen.add(bounds)
                     unique_takes.append(t)
-            fg["takes"] = unique_takes
-            fg["best_take"] = self._score_best_take(fg["takes"])
+                    
+            # 1. Silence Filter
+            valid_takes = []
+            for t in unique_takes:
+                has_long_silence = False
+                for idx in range(t["start_idx"], t["end_idx"]):
+                    word_a = transcript_words[idx]
+                    word_b = transcript_words[idx+1]
+                    silence_s = word_b.get("start", 0) - word_a.get("end", 0)
+                    if silence_s > self.max_silence_s:
+                        has_long_silence = True
+                        break
+                
+                t["has_long_silence"] = has_long_silence
+                if not has_long_silence:
+                    valid_takes.append(t)
+                    
+            pool = valid_takes if valid_takes else unique_takes
+            fg["takes"] = unique_takes # keep all for UI
+            
+            # 2. LLM Judge
+            llm_choice_idx = None
+            explicit_rejection = False
+            
+            if self.llm_judge.enabled and len(pool) > 0:
+                takes_data = []
+                for idx_t, t in enumerate(pool):
+                    text = " ".join([w["word"] for w in transcript_words[t["start_idx"]:t["end_idx"]+1]])
+                    takes_data.append({"id": idx_t, "text": text, "score": t["score"]})
+                
+                script_sentence = fg.get("script_sentence", "")
+                if progress_callback: progress_callback(f"LLM [{i+1}/{total_groups}]: Evaluando toma(s)...")
+                best_idx = self.llm_judge.choose_best_take(script_sentence, takes_data)
+                
+                if best_idx == -1:
+                    explicit_rejection = True
+                    if progress_callback: progress_callback(f"LLM [{i+1}/{total_groups}]: ¡Rechazó todas las tomas!")
+                    print(f"[LLMJudge] Todas las tomas rechazadas para '{script_sentence[:30]}...'")
+                elif best_idx is not None:
+                    llm_choice_idx = best_idx
+                    if progress_callback: progress_callback(f"LLM [{i+1}/{total_groups}]: ¡Resolvió a favor de la toma {best_idx}!")
+                    print(f"[LLMJudge] Elegida toma {best_idx} para '{script_sentence[:30]}...'")
+                else:
+                    if progress_callback: progress_callback(f"LLM [{i+1}/{total_groups}]: LLM falló (Timeout/API). Usando matemáticas.")
+                    
+            if explicit_rejection:
+                fg["best_take"] = None
+            elif llm_choice_idx is not None:
+                fg["best_take"] = pool[llm_choice_idx]
+                fg["best_take"]["chosen_by_llm"] = True
+            else:
+                fg["best_take"] = self._score_best_take(pool) if pool else None
             
         retake_groups = final_groups
         
@@ -478,23 +533,17 @@ class AlignmentEngine:
                         break
                         
             # LLM Semántico (solo si no se determinó CORTAR por fuzzy y ollama está activo)
-            llm_config = self.config.get("llm", {})
-            use_llm = llm_config.get("provider") == "ollama"
-            model_name = llm_config.get("model", "qwen3:32b")
-            
-            if use_llm and rec_action != "CORTAR":
-                llm_idx = self._ask_ollama(u_text, script_sentences, model_name)
-                if llm_idx is not None:
-                    s_text = script_sentences[llm_idx]
-                    bt = next((g["best_take"] for g in retake_groups if g["script_sentence"] == s_text and g["best_take"]), None)
+            if self.llm_judge.enabled and rec_action != "CORTAR":
+                if progress_callback: progress_callback(f"LLM: Evaluando improvisación/basura...")
+                llm_action = self.llm_judge.evaluate_unmatched_segment(u_text)
+                if llm_action == "CORTAR":
                     is_duplicate = True
-                    if bt:
-                        if u["start_time"] < bt["start_time"]:
-                            rec_action = "CORTAR"
-                        else:
-                            rec_action = "DECISIÓN MANUAL"
-                    else:
-                        rec_action = "DECISIÓN MANUAL"
+                    rec_action = "CORTAR"
+                    print(f"[LLMJudge] Huérfano descartado por IA: '{u_text}'")
+                elif llm_action == "CONSERVAR":
+                    is_duplicate = False
+                    rec_action = "DECISIÓN MANUAL"
+                    print(f"[LLMJudge] Huérfano conservado como improvisación: '{u_text}'")
                         
             if is_duplicate:
                 u["duplicate_action"] = rec_action

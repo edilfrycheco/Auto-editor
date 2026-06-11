@@ -74,7 +74,7 @@ class AnalysisWorker(QThread):
                 
             self.log_msg.emit(f"3. Alineando guion vs audio ({len(transcript_words)} palabras)...")
             engine = AlignmentEngine(config)
-            align_results = engine.align(script_text, transcript_words)
+            align_results = engine.align(script_text, transcript_words, progress_callback=log_progress)
             self.progress_val.emit(100)
             
             self.log_msg.emit(f"   - Tomas duplicadas (Retakes): {len(align_results.get('retake_groups', []))}")

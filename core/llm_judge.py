@@ -12,7 +12,7 @@ class LLMJudge:
         self.fallback_model = llm_conf.get("fallback_model", "deepseek-r1:32b")
         self.ollama_url = llm_conf.get("ollama_url", "http://localhost:11434/api/generate")
         
-    def query_ollama(self, model, prompt, expect_json=False):
+    def query_ollama(self, model, prompt, expect_json=False, timeout=30):
         payload = {
             "model": model,
             "prompt": prompt,
@@ -22,7 +22,7 @@ class LLMJudge:
             payload["format"] = "json"
             
         try:
-            response = requests.post(self.ollama_url, json=payload, timeout=30)
+            response = requests.post(self.ollama_url, json=payload, timeout=timeout)
             response.raise_for_status()
             return response.json().get("response", "")
         except requests.exceptions.RequestException as e:
@@ -69,25 +69,63 @@ Devuelve -1 si todas las tomas tienen errores obvios. No incluyas explicaciones 
 
         # 1. Primary Model (Fast)
         logger.debug(f"[LLMJudge] Consultando {self.primary_model} para {len(takes_data)} tomas...")
-        response = self.query_ollama(self.primary_model, prompt, expect_json=True)
+        response = self.query_ollama(self.primary_model, prompt, expect_json=True, timeout=60)
         
         best_id = self._parse_json_response(response)
         
-        if best_id == -1 and self.fallback_model:
-            # 2. Escalation to Fallback (Reasoning)
-            logger.debug(f"[LLMJudge] Qwen3 dudó. Escalando a {self.fallback_model}...")
+        if best_id is None and self.fallback_model:
+            # 2. Escalation to Fallback (Reasoning) ONLY if primary model completely failed to format JSON
+            logger.debug(f"[LLMJudge] Qwen falló en el formato. Escalando a {self.fallback_model}...")
             fallback_prompt = prompt.replace("No incluyas explicaciones en el JSON.", "Puedes pensar paso a paso antes de devolver el JSON final.")
-            fallback_resp = self.query_ollama(self.fallback_model, fallback_prompt, expect_json=False)
-            
-            # Extract JSON from reasoning model (DeepSeek often wraps in ```json or answers after </think>)
+            fallback_resp = self.query_ollama(self.fallback_model, fallback_prompt, expect_json=False, timeout=180)
             best_id = self._extract_json_from_text(fallback_resp)
             
-        if best_id is not None and best_id != -1:
+        if best_id == -1:
+            return -1  # Explicit rejection
+            
+        if best_id is not None:
             # Verify the ID actually exists in our options
             if any(t["id"] == best_id for t in takes_data):
                 return best_id
                 
         return None
+        
+    def evaluate_unmatched_segment(self, text):
+        """
+        Evaluates an unmatched segment (orphan text) to determine if it's a valid improvisation
+        or a speaker mistake/garbage that should be cut.
+        """
+        if not self.enabled:
+            return "DECISIÓN MANUAL"
+            
+        prompt = f"""Eres un juez experto en edición de video.
+El presentador dijo lo siguiente fuera de guion:
+"{text}"
+
+Evalúa si esto es:
+A) Improvisación válida o continuación natural del tema.
+B) Error del presentador: comentarios a producción, muletillas excesivas, equivocaciones (ej. "está muy al paso", "no sé", "me equivoqué", "vamos de nuevo"), o fragmentos sin sentido.
+
+Si es un error o basura (B), debes devolver "CORTAR".
+Si es una improvisación válida (A), debes devolver "CONSERVAR".
+
+Tu respuesta DEBE ser un JSON estricto con el formato:
+{{
+  "action": "CORTAR" | "CONSERVAR"
+}}
+No incluyas explicaciones en el JSON."""
+
+        logger.debug(f"[LLMJudge] Evaluando segmento huérfano: '{text[:30]}...'")
+        response = self.query_ollama(self.primary_model, prompt, expect_json=True, timeout=30)
+        
+        if not response:
+            return "DECISIÓN MANUAL"
+            
+        try:
+            data = json.loads(response)
+            return data.get("action", "DECISIÓN MANUAL")
+        except:
+            return "DECISIÓN MANUAL"
         
     def _parse_json_response(self, response_text):
         if not response_text: return None

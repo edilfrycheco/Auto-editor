@@ -21,9 +21,12 @@ alignment:
   match_complete: 75
   match_partial: 55
   partial_min_coverage: 0.4
-llm:
-  provider: ollama
-  model: qwen3:32b
+llm_judge:
+  enabled: true
+  primary_model: "qwen2.5:32b"
+  fallback_model: "deepseek-r1:32b"
+  max_internal_silence_ms: 1200
+  ollama_url: "http://localhost:11434/api/generate"
 padding:
   pre_head_ms: 120
   post_tail_ms: 180
